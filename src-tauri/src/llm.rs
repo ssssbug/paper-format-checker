@@ -109,50 +109,94 @@ pub async fn check_format_with_llm(
 fn build_format_check_prompt(request: &FormatCheckRequest) -> String {
     let mut prompt = String::new();
 
-    prompt.push_str("你是论文格式检查专家。请根据用户提供的格式要求和论文内容，详细检查所有格式问题，包括但不限于：字体、字号、行距、页边距、对齐方式、段落缩进、页眉页脚、图表格式、参考文献格式等。\n\n");
+    prompt.push_str("你是论文格式检查专家。请根据用户提供的格式要求和论文格式信息，检查所有格式是否符合要求。\n\n");
 
     // 完整的格式要求
-    prompt.push_str("## 格式要求（完整内容）\n");
+    prompt.push_str("## 论文格式要求（请严格遵守）\n");
     prompt.push_str(&request.format_requirements);
     prompt.push_str("\n\n");
 
-    // 完整的论文内容
-    prompt.push_str("## 论文内容（完整）\n");
-    prompt.push_str(&request.document_content);
-    prompt.push_str("\n\n");
+    // 论文格式信息
+    prompt.push_str("## 论文格式信息\n");
+    prompt.push_str(&format!("- 总页数: {}\n", request.document_metadata.page_count));
+    prompt.push_str(&format!("- 总字数: {}\n", request.document_metadata.word_count));
+    prompt.push_str(&format!("- 总段落数: {}\n", request.document_metadata.paragraph_count));
 
-    prompt.push_str("## 论文元数据\n");
-    prompt.push_str(&format!("- 文件类型: {}\n", request.document_metadata.file_type));
-    prompt.push_str(&format!("- 页数: {}\n", request.document_metadata.page_count));
-    prompt.push_str(&format!("- 字数: {}\n", request.document_metadata.word_count));
-    prompt.push_str(&format!("- 段落数: {}\n", request.document_metadata.paragraph_count));
-
+    // 检测到的字体
     if !request.document_metadata.fonts_detected.is_empty() {
-        prompt.push_str("- 检测到的字体: ");
-        prompt.push_str(&request.document_metadata.fonts_detected.join(", "));
-        prompt.push_str("\n");
+        prompt.push_str("\n### 使用的字体\n");
+        for font in &request.document_metadata.fonts_detected {
+            prompt.push_str(&format!("- {}\n", font));
+        }
     }
 
-    if let Some(spacing) = request.document_metadata.average_line_spacing {
-        prompt.push_str(&format!("- 平均行距: {:.1} 倍\n", spacing));
+    // 样式统计
+    if !request.document_metadata.styles_used.is_empty() {
+        prompt.push_str(&format!("\n### 样式统计（共 {} 种样式）\n", request.document_metadata.styles_used.len()));
+        for style in &request.document_metadata.styles_used {
+            prompt.push_str(&format!("- {}: ", style.name));
+            let mut attrs = Vec::new();
+            if let Some(font) = &style.font_name {
+                attrs.push(format!("字体: {}", font));
+            }
+            if let Some(size) = style.font_size {
+                attrs.push(format!("字号: {}pt", size));
+            }
+            if style.is_bold {
+                attrs.push("加粗".to_string());
+            }
+            if let Some(align) = &style.alignment {
+                attrs.push(format!("对齐: {}", align));
+            }
+            if let Some(spacing) = style.line_spacing {
+                attrs.push(format!("行距: {:.1}倍", spacing));
+            }
+            if attrs.is_empty() {
+                prompt.push_str("(默认样式)\n");
+            } else {
+                prompt.push_str(&attrs.join(", "));
+                prompt.push_str("\n");
+            }
+        }
+    }
+
+    // 行距信息
+    if let Some(avg_spacing) = request.document_metadata.average_line_spacing {
+        prompt.push_str(&format!("\n### 行距\n- 平均行距: {:.1} 倍\n", avg_spacing));
+    }
+
+    // 章节检测
+    prompt.push_str("\n### 章节结构\n");
+    if request.document_metadata.has_toc {
+        prompt.push_str("- 有目录\n");
+    } else {
+        prompt.push_str("- 无目录\n");
+    }
+    if request.document_metadata.has_bibliography {
+        prompt.push_str("- 有参考文献\n");
+    } else {
+        prompt.push_str("- 无参考文献\n");
     }
 
     prompt.push_str("\n## 检测要求\n");
-    prompt.push_str("1. 仔细对比格式要求和论文内容，找出所有不符合的地方\n");
-    prompt.push_str("2. 对于每种格式要求（字体、字号、行距、页边距等），都要逐一检查\n");
-    prompt.push_str("3. 如果格式要求中明确规定了某项格式，论文中未满足的都要报告\n");
-    prompt.push_str("4. 检查页面设置（页边距、页眉页脚、页码等）\n");
-    prompt.push_str("5. 检查标题层次是否正确\n");
-    prompt.push_str("6. 检查参考文献格式是否符合要求\n\n");
-
-    prompt.push_str("## 输出要求\n");
+    prompt.push_str("请仔细对比\"论文格式要求\"和\"论文格式信息\"，检查以下方面：\n");
+    prompt.push_str("1. 字体：要求使用什么字体，论文实际使用了什么字体\n");
+    prompt.push_str("2. 字号：各级标题、正文的字号是否正确\n");
+    prompt.push_str("3. 行距：行距设置是否符合要求\n");
+    prompt.push_str("4. 页边距：检查页面设置\n");
+    prompt.push_str("5. 对齐方式：段落对齐是否正确\n");
+    prompt.push_str("6. 缩进：段落缩进是否正确\n");
+    prompt.push_str("7. 标题层次：标题层级是否规范\n");
+    prompt.push_str("8. 页眉页脚：是否有且格式正确\n");
+    prompt.push_str("9. 参考文献：格式是否符合要求\n");
+    prompt.push_str("\n## 输出要求\n");
     prompt.push_str("请以JSON格式返回检查结果，必须包含所有发现的问题：\n");
     prompt.push_str(r#"{
   "issues": [
     {
-      "issue_type": "字体/字号/行距/页边距/对齐/缩进/页眉页脚/标题层次/参考文献/其他",
+      "issue_type": "字体/字号/行距/页边距/对齐/缩进/标题层次/页眉页脚/参考文献/其他",
       "description": "具体问题描述，明确指出哪里不符合要求",
-      "location": {"page": 1, "paragraph": 5, "section": "具体章节"},
+      "location": {"page": null, "paragraph": null, "section": "具体位置"},
       "severity": "critical/major/minor",
       "suggestion": "具体修复建议"
     }
