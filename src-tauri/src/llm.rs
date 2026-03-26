@@ -82,7 +82,7 @@ impl Default for LlmConfig {
         Self {
             provider: "minimax".to_string(),
             api_key: String::new(),
-            model: "abab6.5s-chat".to_string(),
+            model: "MiniMax-Text-01".to_string(),
             base_url: "https://api.minimax.chat/v1".to_string(),
         }
     }
