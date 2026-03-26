@@ -369,9 +369,22 @@ async fn set_llm_config(
     info!("Setting LLM config for provider: {}", provider);
 
     let mut config = state.llm_config.lock().map_err(|e| e.to_string())?;
-    config.provider = provider;
+    config.provider = provider.clone();
     config.api_key = api_key;
     config.model = model;
+
+    // Set correct base_url based on provider
+    match provider.as_str() {
+        "openai" => {
+            config.base_url = "https://api.openai.com/v1".to_string();
+        }
+        "minimax" => {
+            config.base_url = "https://api.minimax.chat/v1".to_string();
+        }
+        _ => {}
+    }
+
+    info!("LLM base_url updated to: {}", config.base_url);
 
     Ok(())
 }
