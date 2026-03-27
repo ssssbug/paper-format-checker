@@ -5,13 +5,20 @@ use std::path::Path;
 mod docx_parser;
 mod pdf_parser;
 mod llm;
+mod format_compare;
 
-use docx_parser::parse_docx;
-use pdf_parser::parse_pdf;
+pub use docx_parser::parse_docx;
+pub use pdf_parser::parse_pdf;
 use llm::{
     check_format_with_llm, LlmConfig, FormatCheckRequest,
-    build_metadata, StyleInfo
+    build_metadata, StyleInfo, parse_guideline_with_llm,
+    GuidelineParseRequest as LlmGuidelineParseRequest, ParsedGuidelineResult,
+    format_requirements_to_text,
 };
+use format_compare::{
+    to_format_issues, ComparisonResult
+};
+pub use format_compare::{parse_format_requirements, compare_format, DocumentFormat, ParagraphFormat, FormatRequirements};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParsedDocument {
@@ -390,6 +397,112 @@ async fn set_llm_config(
 }
 
 #[tauri::command]
+async fn compare_format_locally(
+    format_requirements: String,
+    parsed_document: ParsedDocument,
+) -> Result<FormatCheckResult, String> {
+    info!("Running local format comparison...");
+
+    // Parse requirements from text
+    let requirements = parse_format_requirements(&format_requirements);
+
+    // Convert parsed document to DocumentFormat
+    let paragraphs: Vec<ParagraphFormat> = parsed_document.paragraphs.iter().map(|p| {
+        ParagraphFormat {
+            index: p.index,
+            text: p.text.clone(),
+            style_name: p.style_name.clone(),
+            is_heading: false,
+            heading_level: None,
+            font_name: p.font_name.clone(),
+            font_size: p.font_size,
+            is_bold: false,
+            alignment: None,
+            line_spacing: p.line_spacing,
+            indent_first_line: None,
+            indent_left: None,
+            space_before: None,
+            space_after: None,
+        }
+    }).collect();
+
+    let document = DocumentFormat {
+        paragraphs,
+        styles: std::collections::HashMap::new(),
+        page_count: parsed_document.metadata.page_count,
+        word_count: parsed_document.metadata.word_count,
+    };
+
+    // Run comparison
+    let results = compare_format(&requirements, &document);
+
+    // Convert results to FormatIssue
+    let issues = to_format_issues(results.clone());
+
+    // Build summary
+    let summary = FormatSummary {
+        total_issues: results.len(),
+        critical: results.iter().filter(|r| r.severity == "critical").count(),
+        major: results.iter().filter(|r| r.severity == "major").count(),
+        minor: results.iter().filter(|r| r.severity == "minor").count(),
+        overall_assessment: if results.is_empty() {
+            "格式符合要求".to_string()
+        } else {
+            format!("发现{}个问题", results.len())
+        },
+    };
+
+    Ok(FormatCheckResult { issues, summary })
+}
+
+#[tauri::command]
+async fn parse_guideline(
+    guideline_text: String,
+    guideline_source: Option<String>,
+    expected_style: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<ParsedGuidelineResult, String> {
+    info!("Parsing guideline...");
+
+    let llm_config = {
+        let config = state.llm_config.lock().map_err(|e| e.to_string())?;
+        config.clone()
+    };
+
+    let request = LlmGuidelineParseRequest {
+        guideline_text,
+        guideline_source,
+        expected_style,
+    };
+
+    parse_guideline_with_llm(&llm_config, &request).await
+}
+
+#[tauri::command]
+async fn parse_guideline_to_text(
+    guideline_text: String,
+    guideline_source: Option<String>,
+    expected_style: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    info!("Parsing guideline to text format...");
+
+    let llm_config = {
+        let config = state.llm_config.lock().map_err(|e| e.to_string())?;
+        config.clone()
+    };
+
+    let request = LlmGuidelineParseRequest {
+        guideline_text: guideline_text.clone(),
+        guideline_source: guideline_source.clone(),
+        expected_style: expected_style.clone(),
+    };
+
+    let result = parse_guideline_with_llm(&llm_config, &request).await?;
+    Ok(format_requirements_to_text(&result.requirements))
+}
+
+#[tauri::command]
 fn get_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
@@ -412,8 +525,11 @@ pub fn run() {
             parse_document,
             check_format,
             check_format_with_document,
+            compare_format_locally,
             set_llm_config,
-            get_app_version
+            get_app_version,
+            parse_guideline,
+            parse_guideline_to_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -87,10 +87,18 @@ paper-format-checker/
 │   │   ├── lib.rs         # 主逻辑
 │   │   ├── docx_parser.rs # Word 解析
 │   │   ├── pdf_parser.rs  # PDF 解析
-│   │   └── llm.rs         # LLM API 集成
+│   │   ├── llm.rs         # LLM API 集成
+│   │   └── format_compare.rs  # 格式对比引擎
 │   └── Cargo.toml         # Rust 依赖
 └── package.json           # Node 依赖
 ```
+
+## 新增功能 (v1.1.0)
+
+- **本地格式对比引擎** - 无需调用 LLM API 即可进行格式检查
+- **论文规范解析** - 自动从格式规范文档中提取要求
+- **完善格式提取** - 支持页面边距、标题样式等更多格式属性
+- **逐段落检查** - 精确定位格式问题位置并提供修改建议
 
 ## 配置 LLM
 

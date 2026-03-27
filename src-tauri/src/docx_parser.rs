@@ -13,6 +13,8 @@ pub struct WordDocument {
     pub paragraphs: Vec<WordParagraph>,
     pub styles: Vec<WordStyle>,
     pub properties: DocumentProperties,
+    pub page_layout: PageLayout,
+    pub heading_styles: Vec<HeadingStyle>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,6 +76,47 @@ pub struct DocumentProperties {
     pub word_count: Option<usize>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PageLayout {
+    pub margins: PageMargins,
+    pub page_size: PageSize,
+    pub orientation: String,            // portrait, landscape
+    pub header: Option<String>,         // 页眉内容
+    pub footer: Option<String>,         // 页脚内容
+    pub header_from_top: Option<f32>,   // 页眉距边距
+    pub footer_from_bottom: Option<f32>, // 页脚距边距
+    pub different_odd_even: bool,       // 奇偶页不同
+    pub first_page_different: bool,      // 首页不同
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PageMargins {
+    pub top: Option<f32>,     // 单位：磅
+    pub bottom: Option<f32>,
+    pub left: Option<f32>,
+    pub right: Option<f32>,
+    pub header: Option<f32>,  // 页眉
+    pub footer: Option<f32>,  // 页脚
+    pub gutter: Option<f32>,  // 装订线
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PageSize {
+    pub width: Option<f32>,   // 单位：磅
+    pub height: Option<f32>,
+    pub paper_type: Option<String>, // A4, A3, Letter 等
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HeadingStyle {
+    pub level: u8,           // 标题级别 1-9
+    pub style_name: String,
+    pub font_name: Option<String>,
+    pub font_size: Option<f32>,
+    pub is_bold: bool,
+    pub alignment: Option<String>,
+}
+
 /// Parse a .docx file and extract all content and formatting
 pub fn parse_docx(file_path: &str) -> Result<WordDocument, String> {
     let path = Path::new(file_path);
@@ -113,10 +156,18 @@ pub fn parse_docx(file_path: &str) -> Result<WordDocument, String> {
     properties.page_count = Some(page_count);
     properties.word_count = Some(word_count);
 
+    // Parse page layout from section properties
+    let page_layout = parse_page_layout(&doc_xml);
+
+    // Parse heading styles
+    let heading_styles = parse_heading_styles(style_map.values().cloned().collect());
+
     Ok(WordDocument {
         paragraphs,
         styles: style_map.values().cloned().collect(),
         properties,
+        page_layout,
+        heading_styles,
     })
 }
 
@@ -154,9 +205,9 @@ fn parse_styles(xml: Option<&str>) -> HashMap<String, WordStyle> {
             if let Some(start) = line.find("<w:name ") {
                 let search = &line[start..];
                 if let Some(val_start) = search.find("w:val=\"") {
-                    let val_start = start + val_start + 7;
-                    if let Some(val_end) = line[val_start..].find('"') {
-                        style_name = Some(line[val_start..val_start + val_end].to_string());
+                    let val_start = val_start + 7;
+                    if let Some(val_end) = search[val_start..].find('"') {
+                        style_name = Some(search[val_start..val_start + val_end].to_string());
                     }
                 }
             }
@@ -187,8 +238,6 @@ fn parse_styles(xml: Option<&str>) -> HashMap<String, WordStyle> {
 
 fn parse_document_xml(xml: &str, style_map: &HashMap<String, WordStyle>) -> Vec<WordParagraph> {
     let mut paragraphs = Vec::new();
-    let mut current_text = String::new();
-    let mut current_runs: Vec<WordRun> = Vec::new();
     let mut current_style_id: Option<String> = None;
     let mut current_style_name: Option<String> = None;
     let mut paragraph_index = 0;
@@ -239,14 +288,22 @@ fn parse_document_xml(xml: &str, style_map: &HashMap<String, WordStyle>) -> Vec<
             if let Some(start) = run_block.find("<w:rFonts ") {
                 let search = &run_block[start..];
                 if let Some(name_start) = search.find("w:ascii=\"") {
-                    let name_start = start + name_start + 10;
-                    if let Some(name_end) = search[name_start..].find('"') {
-                        font_name = Some(search[name_start..name_start + name_end].to_string());
+                    let name_start = name_start + 9;
+                    if name_start < search.len() {
+                        if let Some(name_end) = search[name_start..].find('"') {
+                            if name_start + name_end <= search.len() {
+                                font_name = Some(search[name_start..name_start + name_end].to_string());
+                            }
+                        }
                     }
                 } else if let Some(name_start) = search.find("w:asciiTheme=\"") {
-                    let name_start = start + name_start + 14;
-                    if let Some(name_end) = search[name_start..].find('"') {
-                        font_name = Some(search[name_start..name_start + name_end].to_string());
+                    let name_start = name_start + 14;
+                    if name_start < search.len() {
+                        if let Some(name_end) = search[name_start..].find('"') {
+                            if name_start + name_end <= search.len() {
+                                font_name = Some(search[name_start..name_start + name_end].to_string());
+                            }
+                        }
                     }
                 }
             }
@@ -255,7 +312,7 @@ fn parse_document_xml(xml: &str, style_map: &HashMap<String, WordStyle>) -> Vec<
             if let Some(start) = run_block.find("<w:sz ") {
                 let search = &run_block[start..];
                 if let Some(size_start) = search.find("w:val=\"") {
-                    let size_start = start + size_start + 8;
+                    let size_start = size_start + 7;
                     if let Some(size_end) = search[size_start..].find('"') {
                         let size_str = &search[size_start..size_start + size_end];
                         if let Ok(size) = size_str.parse::<f32>() {
@@ -396,40 +453,338 @@ fn parse_properties(xml: Option<&str>) -> DocumentProperties {
     let mut props = DocumentProperties::default();
 
     if let Some(xml) = xml {
+        let xml_len = xml.len();
+
         // Extract title
         if let Some(start) = xml.find("<dc:title>") {
-            let search = &xml[start + 11..];
-            if let Some(end) = search.find("</dc:title>") {
-                props.title = Some(search[..end].to_string());
+            let content_start = start + 11; // "<dc:title>".len() = 11
+            if content_start < xml_len {
+                let search = &xml[content_start..];
+                if let Some(end) = search.find("</dc:title>") {
+                    props.title = Some(search[..end].to_string());
+                }
             }
         }
 
         // Extract author
         if let Some(start) = xml.find("<dc:creator>") {
-            let search = &xml[start + 12..];
-            if let Some(end) = search.find("</dc:creator>") {
-                props.author = Some(search[..end].to_string());
+            let content_start = start + 12; // "<dc:creator>".len() = 12
+            if content_start < xml_len {
+                let search = &xml[content_start..];
+                if let Some(end) = search.find("</dc:creator>") {
+                    props.author = Some(search[..end].to_string());
+                }
             }
         }
 
         // Extract subject
         if let Some(start) = xml.find("<dc:subject>") {
-            let search = &xml[start + 13..];
-            if let Some(end) = search.find("</dc:subject>") {
-                props.subject = Some(search[..end].to_string());
+            let content_start = start + 13; // "<dc:subject>".len() = 13
+            if content_start < xml_len {
+                let search = &xml[content_start..];
+                if let Some(end) = search.find("</dc:subject>") {
+                    props.subject = Some(search[..end].to_string());
+                }
             }
         }
 
         // Extract creator
         if let Some(start) = xml.find("<cp:lastModifiedBy>") {
-            let search = &xml[start + 19..];
-            if let Some(end) = search.find("</cp:lastModifiedBy>") {
-                props.creator = Some(search[..end].to_string());
+            let content_start = start + 19; // "<cp:lastModifiedBy>".len() = 19
+            if content_start < xml_len {
+                let search = &xml[content_start..];
+                if let Some(end) = search.find("</cp:lastModifiedBy>") {
+                    props.creator = Some(search[..end].to_string());
+                }
             }
         }
     }
 
     props
+}
+
+/// Parse page layout from document.xml section properties
+fn parse_page_layout(xml: &str) -> PageLayout {
+    let mut layout = PageLayout::default();
+    layout.orientation = "portrait".to_string(); // 默认竖向
+    let xml_len = xml.len();
+
+    // Look for section properties (<w:sectPr>)
+    if let Some(sect_start) = xml.find("<w:sectPr") {
+        let sect_end = xml[sect_start..].find("</w:sectPr>")
+            .map(|e| sect_start + e + 10)
+            .unwrap_or(xml_len);
+        let sect_xml = &xml[sect_start..sect_end.min(xml_len)];
+        let sect_xml_len = sect_xml.len();
+
+        // Parse page size
+        if let Some(size_start) = sect_xml.find("<w:pgSz ") {
+            let size_search_start = size_start + 8; // "<w:pgSz ".len() = 8
+            if size_search_start < sect_xml_len {
+                let search = &sect_xml[size_search_start..];
+                let search_len = search.len();
+
+                // Width
+                if let Some(w_start) = search.find("w:w=\"") {
+                    let w_start = w_start + 5;
+                    if w_start < search_len {
+                        if let Some(w_end) = search[w_start..].find('"') {
+                            if w_start + w_end <= search_len {
+                                if let Ok(val) = search[w_start..w_start + w_end].parse::<f32>() {
+                                    layout.page_size.width = Some(val / 20.0); // EMU to points
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Height
+                if let Some(h_start) = search.find("w:h=\"") {
+                    let h_start = h_start + 5;
+                    if h_start < search_len {
+                        if let Some(h_end) = search[h_start..].find('"') {
+                            if h_start + h_end <= search_len {
+                                if let Ok(val) = search[h_start..h_start + h_end].parse::<f32>() {
+                                    layout.page_size.height = Some(val / 20.0);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Orientation (width > height = landscape)
+                if let Some(orient_start) = search.find("w:orient=\"") {
+                    let orient_start = orient_start + 11;
+                    if orient_start < search_len {
+                        if let Some(orient_end) = search[orient_start..].find('"') {
+                            if orient_start + orient_end <= search_len {
+                                layout.orientation = search[orient_start..orient_start + orient_end].to_string();
+                            }
+                        }
+                    }
+                }
+
+                // Determine paper type based on size (in points)
+                if let (Some(w), Some(h)) = (layout.page_size.width, layout.page_size.height) {
+                    layout.page_size.paper_type = match (w as u32, h as u32) {
+                        (11906, 16838) => Some("A4".to_string()),
+                        (12240, 15840) => Some("Letter".to_string()),
+                        (16838, 23811) => Some("A3".to_string()),
+                        (11339, 15984) => Some("Legal".to_string()),
+                        _ => None,
+                    };
+                }
+            }
+        }
+
+        // Parse margins
+        if let Some(margin_start) = sect_xml.find("<w:pgMar ") {
+            let margin_search_start = margin_start + 9; // "<w:pgMar ".len() = 9
+            if margin_search_start < sect_xml_len {
+                let search = &sect_xml[margin_search_start..];
+                let search_len = search.len();
+
+                // Top margin
+                if let Some(top_start) = search.find("w:top=\"") {
+                    let m_start = top_start + 8;
+                    if m_start < search_len {
+                        if let Some(m_end) = search[m_start..].find('"') {
+                            if m_start + m_end <= search_len {
+                                if let Ok(val) = search[m_start..m_start + m_end].parse::<f32>() {
+                                    layout.margins.top = Some(val / 20.0);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Bottom margin
+                if let Some(bottom_start) = search.find("w:bottom=\"") {
+                    let m_start = bottom_start + 11;
+                    if m_start < search_len {
+                        if let Some(m_end) = search[m_start..].find('"') {
+                            if m_start + m_end <= search_len {
+                                if let Ok(val) = search[m_start..m_start + m_end].parse::<f32>() {
+                                    layout.margins.bottom = Some(val / 20.0);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Left margin
+                if let Some(left_start) = search.find("w:left=\"") {
+                    let m_start = left_start + 9;
+                    if m_start < search_len {
+                        if let Some(m_end) = search[m_start..].find('"') {
+                            if m_start + m_end <= search_len {
+                                if let Ok(val) = search[m_start..m_start + m_end].parse::<f32>() {
+                                    layout.margins.left = Some(val / 20.0);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Right margin
+                if let Some(right_start) = search.find("w:right=\"") {
+                    let m_start = right_start + 10;
+                    if m_start < search_len {
+                        if let Some(m_end) = search[m_start..].find('"') {
+                            if m_start + m_end <= search_len {
+                                if let Ok(val) = search[m_start..m_start + m_end].parse::<f32>() {
+                                    layout.margins.right = Some(val / 20.0);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Header (distance from top edge to header)
+                if let Some(header_start) = search.find("w:header=\"") {
+                    let m_start = header_start + 11;
+                    if m_start < search_len {
+                        if let Some(m_end) = search[m_start..].find('"') {
+                            if m_start + m_end <= search_len {
+                                if let Ok(val) = search[m_start..m_start + m_end].parse::<f32>() {
+                                    layout.margins.header = Some(val / 20.0);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Footer (distance from bottom edge to footer)
+                if let Some(footer_start) = search.find("w:footer=\"") {
+                    let m_start = footer_start + 11;
+                    if m_start < search_len {
+                        if let Some(m_end) = search[m_start..].find('"') {
+                            if m_start + m_end <= search_len {
+                                if let Ok(val) = search[m_start..m_start + m_end].parse::<f32>() {
+                                    layout.margins.footer = Some(val / 20.0);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Gutter (装订线)
+                if let Some(gutter_start) = search.find("w:gutter=\"") {
+                    let m_start = gutter_start + 11;
+                    if m_start < search_len {
+                        if let Some(m_end) = search[m_start..].find('"') {
+                            if m_start + m_end <= search_len {
+                                if let Ok(val) = search[m_start..m_start + m_end].parse::<f32>() {
+                                    layout.margins.gutter = Some(val / 20.0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Parse header and footer references
+        if let Some(hdr_ref_start) = sect_xml.find("<w:headerReference ") {
+            let search_start = hdr_ref_start + 19; // "<w:headerReference ".len() = 19
+            if search_start < sect_xml_len {
+                let search = &sect_xml[search_start..];
+                let search_len = search.len();
+                if let Some(id_start) = search.find("r:id=\"") {
+                    let id_start = id_start + 5;
+                    if id_start < search_len {
+                        if let Some(id_end) = search[id_start..].find('"') {
+                            if id_start + id_end <= search_len {
+                                layout.header = Some(search[id_start..id_start + id_end].to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(ftr_ref_start) = sect_xml.find("<w:footerReference ") {
+            let search_start = ftr_ref_start + 19; // "<w:footerReference ".len() = 19
+            if search_start < sect_xml_len {
+                let search = &sect_xml[search_start..];
+                let search_len = search.len();
+                if let Some(id_start) = search.find("r:id=\"") {
+                    let id_start = id_start + 5;
+                    if id_start < search_len {
+                        if let Some(id_end) = search[id_start..].find('"') {
+                            if id_start + id_end <= search_len {
+                                layout.footer = Some(search[id_start..id_start + id_end].to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check for different odd/even headers
+        if sect_xml.contains("w:evenAndOddHeaders") {
+            layout.different_odd_even = true;
+        }
+
+        // Check for first page different
+        if sect_xml.contains("w:titlePage") {
+            layout.first_page_different = true;
+        }
+    }
+
+    layout
+}
+
+/// Parse heading styles from style definitions
+fn parse_heading_styles(styles: Vec<WordStyle>) -> Vec<HeadingStyle> {
+    let mut headings = Vec::new();
+
+    for style in styles {
+        // Check if style name contains heading level (e.g., "Heading 1", "标题 1")
+        if let Some(name) = &style.name {
+            let name_lower = name.to_lowercase();
+            if name_lower.contains("heading") || name_lower.contains("标题") {
+                // Try to extract level from name
+                let level = if name_lower.contains("1") && !name_lower.contains("10") {
+                    1
+                } else if name_lower.contains("2") && !name_lower.contains("12") {
+                    2
+                } else if name_lower.contains("3") {
+                    3
+                } else if name_lower.contains("4") {
+                    4
+                } else if name_lower.contains("5") {
+                    5
+                } else if name_lower.contains("6") {
+                    6
+                } else if name_lower.contains("7") {
+                    7
+                } else if name_lower.contains("8") {
+                    8
+                } else if name_lower.contains("9") {
+                    9
+                } else {
+                    continue;
+                };
+
+                let run_fmt = style.run_formatting.as_ref();
+
+                headings.push(HeadingStyle {
+                    level,
+                    style_name: name.clone(),
+                    font_name: run_fmt.and_then(|f| f.font_name.clone()),
+                    font_size: run_fmt.and_then(|f| f.font_size),
+                    is_bold: run_fmt.map(|f| f.is_bold).unwrap_or(false),
+                    alignment: style.paragraph_formatting.as_ref()
+                        .and_then(|f| f.alignment.clone()),
+                });
+            }
+        }
+    }
+
+    // Sort by level
+    headings.sort_by_key(|h| h.level);
+    headings
 }
 
 /// Convert WordDocument to a simpler format for LLM analysis
@@ -447,6 +802,56 @@ pub fn extract_for_llm(doc: &WordDocument) -> String {
     }
     output.push_str(&format!("页数: {:?}\n", doc.properties.page_count));
     output.push_str(&format!("字数: {:?}\n\n", doc.properties.word_count));
+
+    // Page layout
+    output.push_str("=== 页面布局 ===\n");
+    let layout = &doc.page_layout;
+    output.push_str(&format!("方向: {}\n", layout.orientation));
+
+    if let Some(paper_type) = &layout.page_size.paper_type {
+        output.push_str(&format!("纸张: {}\n", paper_type));
+    }
+    if let (Some(w), Some(h)) = (layout.page_size.width, layout.page_size.height) {
+        output.push_str(&format!("页面尺寸: {:.1} x {:.1} 磅\n", w, h));
+    }
+
+    let margins = &layout.margins;
+    if let Some(top) = margins.top {
+        output.push_str(&format!("上边距: {:.1} 磅\n", top));
+    }
+    if let Some(bottom) = margins.bottom {
+        output.push_str(&format!("下边距: {:.1} 磅\n", bottom));
+    }
+    if let Some(left) = margins.left {
+        output.push_str(&format!("左边距: {:.1} 磅\n", left));
+    }
+    if let Some(right) = margins.right {
+        output.push_str(&format!("右边距: {:.1} 磅\n", right));
+    }
+    // Note: different_odd_even and different_first fields may not be available in all versions
+    // if let Some(odd_even) = margins.different_odd_even {
+    //     output.push_str(&format!("奇偶页不同: {}\n", odd_even));
+    // }
+    output.push('\n');
+
+    // Heading styles
+    if !doc.heading_styles.is_empty() {
+        output.push_str("=== 标题层级 ===\n");
+        for heading in &doc.heading_styles {
+            output.push_str(&format!("级别 {}: {}", heading.level, heading.style_name));
+            if let Some(font) = &heading.font_name {
+                output.push_str(&format!(" 字体: {}", font));
+            }
+            if let Some(size) = heading.font_size {
+                output.push_str(&format!(" 字号: {}pt", size));
+            }
+            if heading.is_bold {
+                output.push_str(" 加粗");
+            }
+            output.push('\n');
+        }
+        output.push('\n');
+    }
 
     // Styles summary
     output.push_str("=== 样式统计 ===\n");
